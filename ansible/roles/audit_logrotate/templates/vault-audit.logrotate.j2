@@ -1,0 +1,20 @@
+# Managed by Ansible (role audit_logrotate) -- ne pas editer a la main.
+# Rotation du journal d'audit Vault (backend "file").
+# Sans rotation, ce fichier sature lv_var_log (/var/log, ~5 Go) et Vault,
+# fail-closed sur l'audit, refuse toute requete authentifiee (500). Incident 06/2026.
+# copytruncate : Vault garde le fichier ouvert -> on copie puis on tronque EN PLACE,
+# aucun signal/HUP requis (petit risque de perdre quelques lignes pendant la copie,
+# acceptable pour un journal d'audit ; evite de devoir relancer Vault).
+{{ audit_logrotate_file }} {
+    su {{ audit_logrotate_su_user }} {{ audit_logrotate_su_group }}
+    {{ audit_logrotate_frequency }}
+    maxsize {{ audit_logrotate_maxsize }}
+    rotate {{ audit_logrotate_rotate }}
+    missingok
+    notifempty
+{% if audit_logrotate_compress %}
+    compress
+    delaycompress
+{% endif %}
+    copytruncate
+}

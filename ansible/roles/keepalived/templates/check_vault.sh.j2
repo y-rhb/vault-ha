@@ -1,0 +1,23 @@
+#!/bin/bash
+# Health check script for Vault (niveau 1 : sante)
+# Used by keepalived with a NEGATIVE weight: this script does not gate VRRP
+# membership, it only DEPRIORITIZES a node whose Vault is not answering.
+# Healthy = Vault answers 200 (leader), 429 (standby) or 473 (perf standby):
+# any of these can serve the VIP (standbys forward reads to the leader).
+# Failure = keepalived lowers this node priority (weight -10), it does NOT put
+# the instance in FAULT -> the VIP is never auto-dropped (see keepalived.conf.j2).
+# Leader affinity is handled by a separate script (check_vault_leader.sh).
+
+VAULT_ADDR="https://127.0.0.1:{{ vault_api_port }}"
+
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+  --connect-timeout {{ keepalived_check_curl_timeout }} \
+  --max-time {{ keepalived_check_curl_timeout }} \
+  --cacert {{ vault_tls_ca_file }} \
+  "${VAULT_ADDR}/v1/sys/health" 2>/dev/null)
+
+if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "429" ] || [ "$HTTP_CODE" = "473" ]; then
+  exit 0
+fi
+
+exit 1

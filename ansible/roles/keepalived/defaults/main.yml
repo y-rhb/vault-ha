@@ -1,0 +1,57 @@
+---
+# ============================================================================
+# Keepalived role - variables par defaut
+# VIP flottante pour le cluster Vault
+# ============================================================================
+
+vip_interface: "{{ ansible_default_ipv4.interface }}"
+
+# VRRP (52 pour Vault, 51 pour HAProxy)
+vrrp_router_id: 52
+
+keepalived_auth_pass: "vaultcluster"
+
+# Priorite statique : VAULT-001=101, VAULT-002=100, VAULT-003=99.
+# Ecart max entre noeuds = 2 : le bonus leader (keepalived_leader_check_weight)
+# doit toujours rester tres superieur a cet ecart pour que le leader Raft
+# gagne l'election VRRP quelle que soit sa priorite statique.
+keepalived_priority: "{{ 101 - groups['vault'].index(inventory_hostname) }}"
+
+# --- Check niveau 1 : sante (deprioritise un noeud dont Vault ne repond pas) ---
+# Sain si /v1/sys/health repond 200 (leader), 429 (standby) ou 473 (perf
+# standby). weight NEGATIF (pas de FAULT) : un echec RETIRE de la priorite au
+# lieu de sortir le noeud du VRRP. Un noeud Vault KO est ainsi depasse par un
+# noeud sain (qui prend la VIP), mais si les 3 checks echouent en meme temps
+# (ex. rotation du cert du listener Vault qui casse le curl --cacert partout),
+# la VIP n'est JAMAIS auto-larguee : les 3 noeuds tombent a l'identique et elle
+# reste sur la priorite statique max. Aligne sur la decision preempt + weight
+# negatif de HAProxy_IaC (2026-07-07).
+keepalived_check_script: /usr/local/bin/check_vault.sh
+keepalived_check_interval: 2
+keepalived_check_rise: 2
+keepalived_check_fall: 2
+# Negatif = deprioritise un noeud dont Vault ne repond pas SANS jamais le sortir
+# du VRRP -> la VIP n'est jamais auto-larguee (aligne sur preempt + weight
+# negatif du 07/07). Doit rester bien inferieur en valeur absolue au bonus
+# leader (+50) pour que le leader domine toujours.
+keepalived_health_weight: -10
+
+# --- Check niveau 2 : tracking du leader Raft (bonus de priorite) ---
+# Renvoie 0 uniquement si /v1/sys/health = 200 (noeud actif). weight POSITIF :
+# le leader recoit +50 de priorite effective et depasse l'ecart statique (2),
+# donc la VIP suit toujours le leader. rise/fall 2 x interval 2s = ~4s de
+# leadership stable requis avant bascule (amortit les micro-flaps d'election).
+# Booleen : false retire UNIQUEMENT le suivi du leader (mode "HA de base sans
+# leader-tracking"). Le check de sante GARDE son weight negatif (jamais FAULT)
+# et nopreempt reste retire -> ce n'est PAS un retour a un etat anterieur precis,
+# juste la VIP sur la priorite effective max (statique moins la penalite sante).
+keepalived_track_leader: true
+keepalived_leader_check_script: /usr/local/bin/check_vault_leader.sh
+keepalived_leader_check_interval: 2
+keepalived_leader_check_rise: 2
+keepalived_leader_check_fall: 2
+keepalived_leader_check_weight: 50
+
+# Timeout curl des checks (secondes) : court pour qu'un Vault qui ne repond
+# plus soit detecte en un interval, pas apres un long timeout TCP.
+keepalived_check_curl_timeout: 2

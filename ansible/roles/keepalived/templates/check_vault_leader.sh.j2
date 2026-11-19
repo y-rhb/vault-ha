@@ -1,0 +1,22 @@
+#!/bin/bash
+# Leader tracking script for Vault (niveau 2 : affinite leader)
+# Used by keepalived as a PRIORITY BONUS (weight +{{ keepalived_leader_check_weight }}), not as a health check.
+# Returns 0 ONLY if this node is the active Raft leader.
+# /v1/sys/health without params defaults to standbyok=false: 200 = active
+# (leader), 429 = standby, 473 = perf standby -> only 200 succeeds here.
+# Rationale: writes through a standby can time out during leader elections
+# (writes-500 incident 2026-06-28), so the VIP must follow the Raft leader.
+
+VAULT_ADDR="https://127.0.0.1:{{ vault_api_port }}"
+
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+  --connect-timeout {{ keepalived_check_curl_timeout }} \
+  --max-time {{ keepalived_check_curl_timeout }} \
+  --cacert {{ vault_tls_ca_file }} \
+  "${VAULT_ADDR}/v1/sys/health" 2>/dev/null)
+
+if [ "$HTTP_CODE" = "200" ]; then
+  exit 0
+fi
+
+exit 1

@@ -1,0 +1,94 @@
+---
+# disk_expansion role
+#
+# Probleme adresse : le template Packer est construit sur un petit disque, mais
+# Terraform clone les VMs avec un VMDK plus grand (workers : 100 Go). L'ecart
+# (~51 Go sur les workers) reste en espace non partitionne car le `--grow` du
+# kickstart ne s'execute qu'au build du template, jamais au clone. Resultat :
+# /var sature et declenche du DiskPressure cote kubelet.
+#
+# Ce role recupere cet espace fantome (growpart + pvresize) puis etend les
+# logical volumes selon `disk_expansion_layout`. Toutes les operations sont
+# online (pas de reboot) et idempotentes (rejouables a chaque pipeline).
+
+- name: Skip when no expansion layout is defined
+  ansible.builtin.meta: end_host
+  when: disk_expansion_layout | length == 0
+
+- name: Ensure growpart is available (cloud-utils-growpart)
+  become: true
+  ansible.builtin.dnf:
+    name: cloud-utils-growpart
+    state: present
+
+# --- Etape 1 : recuperer l'espace disque non partitionne -------------------
+- name: Grow the LVM partition to fill the disk
+  become: true
+  ansible.builtin.command:
+    cmd: "growpart {{ disk_expansion_device }} {{ disk_expansion_partition }}"
+  register: disk_expansion_growpart
+  # growpart sort rc=1 + "NOCHANGE" quand la partition occupe deja tout le disque
+  failed_when:
+    - disk_expansion_growpart.rc != 0
+    - "'NOCHANGE' not in disk_expansion_growpart.stdout"
+  changed_when: "'CHANGED' in disk_expansion_growpart.stdout"
+
+- name: Resize the physical volume to the new partition size
+  become: true
+  ansible.builtin.command:
+    cmd: "pvresize {{ disk_expansion_pv }}"
+  register: disk_expansion_pvresize
+  # Idempotent : pvresize ne fait rien si le PV occupe deja toute la partition
+  changed_when: "'resized' in disk_expansion_pvresize.stdout and '0 physical' not in disk_expansion_pvresize.stdout"
+
+# --- Etape 2 : etendre les logical volumes selon la politique ---------------
+# On separe lvextend et xfs_growfs (plutot que lvextend --resizefs) : xfs_growfs
+# est idempotent et joue inconditionnellement, ce qui rattrape un eventuel etat
+# incoherent (LV deja agrandi mais FS pas encore) qu'un --resizefs court-circuite.
+#
+# item.size accepte deux formes :
+#   - taille absolue : "50g"        -> lvextend --size 50g
+#   - part d'extents : "+100%FREE"  -> lvextend --extents +100%FREE
+# "+100%FREE" donne tout l'espace VG libre restant au LV (cible privilegiee pour
+# /var : marche quel que soit le disque, 50 ou 100 Go, sans calcul de taille).
+- name: Extend logical volumes
+  become: true
+  ansible.builtin.command:
+    cmd: >-
+      lvextend
+      {{ '--extents' if '%' in item.size else '--size' }} {{ item.size }}
+      /dev/{{ item.vg }}/{{ item.lv }}
+  loop: "{{ disk_expansion_layout }}"
+  loop_control:
+    label: "{{ item.vg }}/{{ item.lv }} -> {{ item.size }}"
+  register: disk_expansion_lvextend
+  # Idempotence : quand le LV est deja a la taille cible, lvextend sort rc=5 avec
+  # "New size ... matches existing size" (stdout) + "No size change." (stderr).
+  # On accepte ces deux cas comme un succes (no-op). Tout autre rc!=0 reste une erreur.
+  failed_when:
+    - disk_expansion_lvextend.rc != 0
+    - "'matches existing size' not in disk_expansion_lvextend.stdout"
+    - "'No size change' not in disk_expansion_lvextend.stderr"
+  changed_when: "'Size of logical volume' in disk_expansion_lvextend.stdout"
+
+- name: Grow the XFS filesystems to fill their logical volumes
+  become: true
+  ansible.builtin.command:
+    cmd: "xfs_growfs {{ item.mount }}"
+  loop: "{{ disk_expansion_layout }}"
+  loop_control:
+    label: "{{ item.mount }}"
+  register: disk_expansion_growfs
+  # xfs_growfs sort rc=0 dans tous les cas ; il n'agrandit que si besoin
+  changed_when: "'data blocks changed' in disk_expansion_growfs.stdout"
+
+- name: Report resulting filesystem usage
+  become: true
+  ansible.builtin.command:
+    cmd: "df -h {{ disk_expansion_layout | map(attribute='mount') | join(' ') }}"
+  register: disk_expansion_df
+  changed_when: false
+
+- name: Show filesystem usage after expansion
+  ansible.builtin.debug:
+    var: disk_expansion_df.stdout_lines

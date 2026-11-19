@@ -1,0 +1,23 @@
+---
+# ============================================================================
+# Role audit_logrotate : rotation du journal d'audit Vault
+# ============================================================================
+# Le backend d'audit "file" de Vault ecrit dans un fichier qui grossit
+# indefiniment. Sans rotation, il sature le LV dedie lv_var_log (/var/log,
+# ~5 Go, partition CIS) et Vault, fail-closed sur l'audit, refuse alors TOUTE
+# requete authentifiee ("internal error" 500). Incident 06/2026.
+# Ce role pose une politique logrotate dediee (le declenchement est assure par
+# le timer systemd logrotate.timer deja present sur Rocky, rien a creer).
+
+# Fichier d'audit a tourner (aligne sur le role vault).
+audit_logrotate_file: "{{ vault_audit_log_file | default('/var/log/vault/audit.log') }}"
+
+# Politique de rotation.
+audit_logrotate_frequency: daily      # tour quotidien...
+audit_logrotate_maxsize: "1G"         # ...OU des que le fichier depasse 1G (anti-burst CI)
+audit_logrotate_rotate: 14            # nombre d'archives conservees
+audit_logrotate_compress: true        # compresser les archives (gzip)
+
+# Proprietaire du repertoire d'audit (cf role vault : /var/log/vault 0750 vault:vault).
+audit_logrotate_su_user: vault
+audit_logrotate_su_group: vault

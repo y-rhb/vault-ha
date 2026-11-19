@@ -1,0 +1,57 @@
+---
+# Install and configure Keepalived for Vault VIP failover
+
+- name: Install keepalived
+  ansible.builtin.dnf:
+    name:
+      - keepalived
+    state: present
+
+- name: Deploy Vault health check script
+  ansible.builtin.template:
+    src: check_vault.sh.j2
+    dest: "{{ keepalived_check_script }}"
+    mode: '0755'
+
+# Second track_script : bonus de priorite au leader Raft (la VIP le suit).
+# keepalived re-execute les scripts a chaque interval : pas de restart requis
+# pour un changement de contenu, seul keepalived.conf notifie le handler.
+- name: Deploy Vault leader tracking script
+  ansible.builtin.template:
+    src: check_vault_leader.sh.j2
+    dest: "{{ keepalived_leader_check_script }}"
+    mode: '0755'
+  when: keepalived_track_leader | bool
+
+- name: Remove Vault leader tracking script when disabled
+  ansible.builtin.file:
+    path: "{{ keepalived_leader_check_script }}"
+    state: absent
+  when: not keepalived_track_leader | bool
+
+- name: Deploy keepalived configuration
+  ansible.builtin.template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    mode: '0644'
+  notify: Restart keepalived
+
+- name: Configure SELinux to allow VRRP
+  ansible.posix.seboolean:
+    name: nis_enabled
+    state: yes
+    persistent: yes
+
+- name: Allow VRRP protocol in firewall
+  ansible.posix.firewalld:
+    rich_rule: 'rule protocol value="vrrp" accept'
+    permanent: yes
+    state: enabled
+    immediate: yes
+
+- name: Enable and start keepalived
+  ansible.builtin.systemd:
+    name: keepalived
+    state: started
+    enabled: yes
+    daemon_reload: yes

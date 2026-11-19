@@ -1,0 +1,21 @@
+---
+# disk_expansion role - default variables
+#
+# Recupere l'espace disque non partitionne (ecart entre la taille du disque du
+# template Packer et la taille du VMDK clone par Terraform) puis etend les
+# logical volumes selon une politique declarative.
+#
+# Par defaut le role ne fait RIEN (layout vide) : la politique est definie par
+# projet/role dans les group_vars (ex: group_vars/k8s_cluster.yml).
+
+# Disque OS et partition LVM (PV) a etendre.
+disk_expansion_device: /dev/sda
+disk_expansion_partition: 3
+# Chemin du physical volume (override possible pour NVMe : nvme0n1p3, etc.)
+disk_expansion_pv: "{{ disk_expansion_device }}{{ disk_expansion_partition }}"
+
+# Politique de repartition. Liste de LV avec leur taille cible ABSOLUE.
+# Vide = no-op. Exemple :
+#   disk_expansion_layout:
+#     - { vg: vg_root, lv: lv_var, size: "50g" }
+disk_expansion_layout: []

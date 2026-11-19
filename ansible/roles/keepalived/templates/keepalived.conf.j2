@@ -1,0 +1,73 @@
+global_defs {
+    router_id {{ inventory_hostname }}
+    enable_script_security
+    script_user root
+}
+
+# Niveau 1 - sante : weight NEGATIF ({{ keepalived_health_weight }}) -> un echec
+# RETIRE de la priorite au lieu de mettre le noeud en FAULT. Objectif : ne
+# JAMAIS auto-larguer la VIP. Si le curl --cacert casse sur les 3 noeuds a la
+# fois (rotation du cert du listener Vault), tous sont deprioritises a
+# l'identique et la VIP reste sur la priorite statique max au lieu de
+# disparaitre (aligne sur la decision preempt + weight negatif de HAProxy_IaC
+# 2026-07-07).
+vrrp_script check_vault {
+    script "{{ keepalived_check_script }}"
+    interval {{ keepalived_check_interval }}
+    weight {{ keepalived_health_weight }}
+    fall {{ keepalived_check_fall }}
+    rise {{ keepalived_check_rise }}
+}
+
+{% if keepalived_track_leader | bool %}
+# Niveau 2 - leader Raft : weight POSITIF (+{{ keepalived_leader_check_weight }}) =
+# bonus de priorite au leader actif (200 sur /v1/sys/health). La VIP suit le
+# leader ; pendant une election (aucun 200 nulle part), personne n'a le bonus et
+# la VIP reste sur le noeud SAIN de plus haute priorite statique, qui forwarde
+# les lectures.
+#
+# Priorite effective (base = priorite statique 101/100/99, ecart max 2) :
+#   - leader sain         : base +{{ keepalived_leader_check_weight }}
+#   - non-leader sain     : base
+#   - non-leader Vault KO : base {{ keepalived_health_weight }}
+#   - 3 checks KO (TLS)   : tous a base {{ keepalived_health_weight }} -> VIP sur la
+#                           priorite statique max, jamais larguee.
+# Le bonus +{{ keepalived_leader_check_weight }} domine l'ecart statique (2) ET la
+# penalite sante ({{ keepalived_health_weight }}) : pire cas leader = 99 +{{ keepalived_leader_check_weight }} = {{ 99 + keepalived_leader_check_weight }} >
+# meilleur non-leader = 101 -> la VIP suit toujours le leader.
+vrrp_script check_vault_leader {
+    script "{{ keepalived_leader_check_script }}"
+    interval {{ keepalived_leader_check_interval }}
+    weight {{ keepalived_leader_check_weight }}
+    fall {{ keepalived_leader_check_fall }}
+    rise {{ keepalived_leader_check_rise }}
+}
+
+{% endif %}
+vrrp_instance VI_VAULT {
+    state {% if groups['vault'].index(inventory_hostname) == 0 %}MASTER{% else %}BACKUP{% endif %}
+
+    interface {{ vip_interface }}
+    virtual_router_id {{ vrrp_router_id }}
+    priority {{ keepalived_priority }}
+    advert_int 1
+    # preempt (comportement par defaut) assume : nopreempt bloquerait la
+    # reprise de la VIP par le noeud portant le bonus leader et pourrait la
+    # coincer sur un standby (lecon audit HAProxy 2026-07-07).
+
+    authentication {
+        auth_type PASS
+        auth_pass {{ keepalived_auth_pass }}
+    }
+
+    virtual_ipaddress {
+        {{ vip_address }}
+    }
+
+    track_script {
+        check_vault
+{% if keepalived_track_leader | bool %}
+        check_vault_leader
+{% endif %}
+    }
+}

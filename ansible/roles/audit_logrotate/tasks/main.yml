@@ -1,0 +1,29 @@
+---
+# ============================================================================
+# Role audit_logrotate : rotation du journal d'audit Vault
+# ============================================================================
+
+- name: Ensure logrotate is installed
+  ansible.builtin.dnf:
+    name: logrotate
+    state: present
+  become: true
+
+- name: Deploy logrotate policy for the Vault audit log
+  ansible.builtin.template:
+    src: vault-audit.logrotate.j2
+    dest: /etc/logrotate.d/vault
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+
+# Validation syntaxique : logrotate -d simule la rotation (aucune ecriture) et
+# sort en erreur si la conf est invalide. changed_when=false : c'est un check.
+- name: Validate the logrotate configuration (debug, no rotation)
+  ansible.builtin.command:
+    cmd: logrotate -d /etc/logrotate.d/vault
+  become: true
+  register: audit_logrotate_check
+  changed_when: false
+  check_mode: false
